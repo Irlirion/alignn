@@ -22,7 +22,7 @@ from alignn.utils import BaseSettings
 class ALIGNNConfig(BaseSettings):
     """Hyperparameter schema for jarvisdgl.models.alignn."""
 
-    name: Literal["alignn"]
+    name: Literal["alignn2"]
     alignn_layers: int = 4
     gcn_layers: int = 4
     atom_input_features: int = 92
@@ -160,10 +160,10 @@ class ALIGNNConv(nn.Module):
         g = g.local_var()
         lg = lg.local_var()
         # Edge-gated graph convolution update on crystal graph
-        x, m = self.node_update(g, x, y)
+        m, z = self.edge_update(lg, y, z)
 
         # Edge-gated graph convolution update on crystal graph
-        y, z = self.edge_update(lg, m, z)
+        x, y = self.node_update(g, x, m)
 
         return x, y, z
 
@@ -185,14 +185,14 @@ class MLPLayer(nn.Module):
         return self.layer(x)
 
 
-class ALIGNN(nn.Module):
+class ALIGNN2(nn.Module):
     """Atomistic Line graph network.
 
     Chain alternating gated graph convolution updates on crystal graph
     and atomistic line graph.
     """
 
-    def __init__(self, config: ALIGNNConfig = ALIGNNConfig(name="alignn")):
+    def __init__(self, config: ALIGNNConfig = ALIGNNConfig(name="alignn2")):
         """Initialize class with number of input features, conv layers."""
         super().__init__()
         # print(config)

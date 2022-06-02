@@ -13,6 +13,9 @@ import ignite
 import torch
 
 from ignite.contrib.handlers import TensorboardLogger
+from ignite.contrib.handlers.wandb_logger import WandBLogger
+
+from alignn.models.alignn_fixed import ALIGNN2
 try:
     from ignite.contrib.handlers.stores import EpochOutputStore
     # For different version of pytorch-ignite
@@ -41,6 +44,7 @@ import pickle as pk
 import numpy as np
 from ignite.handlers import Checkpoint, DiskSaver, TerminateOnNan
 from ignite.metrics import Loss, MeanAbsoluteError
+from ignite.contrib.metrics.regression import R2Score
 from torch import nn
 from alignn import models
 from alignn.data import get_train_val_loaders
@@ -52,10 +56,11 @@ from alignn.models.dense_alignn import DenseALIGNN
 from alignn.models.densegcn import DenseGCN
 from alignn.models.icgcnn import iCGCNN
 from alignn.models.alignn_cgcnn import ACGCNN
+from alignn.models.alignn_wfedge import ALIGNNWF
 from jarvis.db.jsonutils import dumpjson
 import json
 import pprint
-
+from clearml import Task
 import os
 
 # from sklearn.decomposition import PCA, KernelPCA
@@ -147,6 +152,11 @@ def train_dgl(
     `config` should conform to alignn.conf.TrainingConfig, and
     if passed as a dict with matching keys, pydantic validation is used
     """
+    # task = Task.init(
+    #     project_name='GraphDrugs', 
+    #     task_name='Tmqm ALIGNN wfrbf-edge', 
+    #     output_uri="s3://api.blackhole.ai.innopolis.university:443/new-material-clearml/"
+    # )
     print(config)
     if type(config) is dict:
         try:
@@ -245,6 +255,8 @@ def train_dgl(
         "dense_alignn": DenseALIGNN,
         "alignn_cgcnn": ACGCNN,
         "alignn_layernorm": ALIGNN_LN,
+        "alignn2": ALIGNN2,
+        "alignn_wf_edge": ALIGNNWF,
     }
     if model is None:
         net = _model.get(config.model.name)(config.model)
@@ -311,7 +323,7 @@ def train_dgl(
     criterion = criteria[config.criterion]
 
     # set up training engine and evaluators
-    metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError()}
+    metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError(), "r2": R2Score()}
     if config.model.output_features > 1 and config.standard_scalar_and_pca:
         # metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError()}
         metrics = {
@@ -485,151 +497,170 @@ def train_dgl(
     # optionally log results to tensorboard
     if config.log_tensorboard:
 
-        tb_logger = TensorboardLogger(
-            log_dir=os.path.join(config.output_dir, "tb_logs", "test")
+        # tb_logger = TensorboardLogger(
+        #     log_dir=os.path.join(config.output_dir, "tb_logs", "test")
+        # )
+        # for tag, evaluator in [
+        #     ("training", train_evaluator),
+        #     ("validation", evaluator),
+        # ]:
+        #     tb_logger.attach_output_handler(
+        #         evaluator,
+        #         event_name=Events.EPOCH_COMPLETED,
+        #         tag=tag,
+        #         metric_names=["loss", "mae"],
+        #         global_step_transform=global_step_from_engine(trainer),
+        #     )
+        
+        tb_logger = WandBLogger(
+            entity="inno-materials-ai",
+            project="tmqm-alignn",
+            name="ALIGNN-small-baseline",
+            config=config.dict(),
         )
+        
         for tag, evaluator in [
-            ("training", train_evaluator),
-            ("validation", evaluator),
+            ("train", train_evaluator),
+            ("val", evaluator),
         ]:
             tb_logger.attach_output_handler(
                 evaluator,
                 event_name=Events.EPOCH_COMPLETED,
                 tag=tag,
-                metric_names=["loss", "mae"],
+                metric_names=["loss", "mae", "r2"],
                 global_step_transform=global_step_from_engine(trainer),
             )
 
     # train the model!
     trainer.run(train_loader, max_epochs=config.epochs)
 
-    if config.log_tensorboard:
-        test_loss = evaluator.state.metrics["loss"]
-        tb_logger.writer.add_hparams(config, {"hparam/test_loss": test_loss})
-        tb_logger.close()
-    if config.write_predictions and classification:
-        net.eval()
-        f = open(
-            os.path.join(config.output_dir, "prediction_results_test_set.csv"),
-            "w",
-        )
-        f.write("id,target,prediction\n")
-        targets = []
-        predictions = []
-        with torch.no_grad():
-            ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
-            for dat, id in zip(test_loader, ids):
-                g, lg, target = dat
-                out_data = net([g.to(device), lg.to(device)])
-                # out_data = torch.exp(out_data.cpu())
-                top_p, top_class = torch.topk(torch.exp(out_data), k=1)
-                target = int(target.cpu().numpy().flatten().tolist()[0])
+    # if config.log_tensorboard:
+    #     test_loss = evaluator.state.metrics["loss"]
+    #     tb_logger.writer.add_hparams(config, {"hparam/test_loss": test_loss})
+    #     tb_logger.close()
+    # if config.write_predictions and classification:
+    #     net.eval()
+    #     f = open(
+    #         os.path.join(config.output_dir, "prediction_results_test_set.csv"),
+    #         "w",
+    #     )
+    #     f.write("id,target,prediction\n")
+    #     targets = []
+    #     predictions = []
+    #     with torch.no_grad():
+    #         ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
+    #         for dat, id in zip(test_loader, ids):
+    #             g, lg, target = dat
+    #             out_data = net([g.to(device), lg.to(device)])
+    #             # out_data = torch.exp(out_data.cpu())
+    #             top_p, top_class = torch.topk(torch.exp(out_data), k=1)
+    #             target = int(target.cpu().numpy().flatten().tolist()[0])
 
-                f.write("%s, %d, %d\n" % (id, (target), (top_class)))
-                targets.append(target)
-                predictions.append(
-                    top_class.cpu().numpy().flatten().tolist()[0]
-                )
-        f.close()
-        from sklearn.metrics import roc_auc_score
+    #             f.write("%s, %d, %d\n" % (id, (target), (top_class)))
+    #             targets.append(target)
+    #             predictions.append(
+    #                 top_class.cpu().numpy().flatten().tolist()[0]
+    #             )
+    #     f.close()
+    #     from sklearn.metrics import roc_auc_score
 
-        print("predictions", predictions)
-        print("targets", targets)
-        print(
-            "Test ROCAUC:",
-            roc_auc_score(np.array(targets), np.array(predictions)),
-        )
+    #     print("predictions", predictions)
+    #     print("targets", targets)
+    #     print(
+    #         "Test ROCAUC:",
+    #         roc_auc_score(np.array(targets), np.array(predictions)),
+    #     )
 
-    if (
-        config.write_predictions
-        and not classification
-        and config.model.output_features > 1
-    ):
-        net.eval()
-        mem = []
-        with torch.no_grad():
-            ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
-            for dat, id in zip(test_loader, ids):
-                g, lg, target = dat
-                out_data = net([g.to(device), lg.to(device)])
-                out_data = out_data.cpu().numpy().tolist()
-                if config.standard_scalar_and_pca:
-                    sc = pk.load(open("sc.pkl", "rb"))
-                    out_data = list(
-                        sc.transform(np.array(out_data).reshape(1, -1))[0]
-                    )  # [0][0]
-                target = target.cpu().numpy().flatten().tolist()
-                info = {}
-                info["id"] = id
-                info["target"] = target
-                info["predictions"] = out_data
-                mem.append(info)
-        dumpjson(
-            filename=os.path.join(
-                config.output_dir, "multi_out_predictions.json"
-            ),
-            data=mem,
-        )
-    if (
-        config.write_predictions
-        and not classification
-        and config.model.output_features == 1
-    ):
-        net.eval()
-        f = open(
-            os.path.join(config.output_dir, "prediction_results_test_set.csv"),
-            "w",
-        )
-        f.write("id,target,prediction\n")
-        targets = []
-        predictions = []
-        with torch.no_grad():
-            ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
-            for dat, id in zip(test_loader, ids):
-                g, lg, target = dat
-                out_data = net([g.to(device), lg.to(device)])
-                out_data = out_data.cpu().numpy().tolist()
-                if config.standard_scalar_and_pca:
-                    sc = pk.load(
-                        open(os.path.join(tmp_output_dir, "sc.pkl"), "rb")
-                    )
-                    out_data = sc.transform(np.array(out_data).reshape(-1, 1))[
-                        0
-                    ][0]
-                target = target.cpu().numpy().flatten().tolist()
-                if len(target) == 1:
-                    target = target[0]
-                f.write("%s, %6f, %6f\n" % (id, target, out_data))
-                targets.append(target)
-                predictions.append(out_data)
-        f.close()
-        from sklearn.metrics import mean_absolute_error
+    # if (
+    #     config.write_predictions
+    #     and not classification
+    #     and config.model.output_features > 1
+    # ):
+    #     net.eval()
+    #     mem = []
+    #     with torch.no_grad():
+    #         ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
+    #         for dat, id in zip(test_loader, ids):
+    #             g, lg, target = dat
+    #             out_data = net([g.to(device), lg.to(device)])
+    #             out_data = out_data.cpu().numpy().tolist()
+    #             if config.standard_scalar_and_pca:
+    #                 sc = pk.load(open("sc.pkl", "rb"))
+    #                 out_data = list(
+    #                     sc.transform(np.array(out_data).reshape(1, -1))[0]
+    #                 )  # [0][0]
+    #             target = target.cpu().numpy().flatten().tolist()
+    #             info = {}
+    #             info["id"] = id
+    #             info["target"] = target
+    #             info["predictions"] = out_data
+    #             mem.append(info)
+    #     dumpjson(
+    #         filename=os.path.join(
+    #             config.output_dir, "multi_out_predictions.json"
+    #         ),
+    #         data=mem,
+    #     )
+    # if (
+    #     config.write_predictions
+    #     and not classification
+    #     and config.model.output_features == 1
+    # ):
+    #     net.eval()
+    #     f = open(
+    #         os.path.join(config.output_dir, "prediction_results_test_set.csv"),
+    #         "w",
+    #     )
+    #     f.write("id,target,prediction\n")
+    #     targets = []
+    #     predictions = []
+    #     with torch.no_grad():
+    #         ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
+    #         for dat, id in zip(test_loader, ids):
+    #             g, lg, target = dat
+    #             out_data = net([g.to(device), lg.to(device)])
+    #             out_data = out_data.cpu().numpy().tolist()
+    #             if config.standard_scalar_and_pca:
+    #                 sc = pk.load(
+    #                     open(os.path.join(tmp_output_dir, "sc.pkl"), "rb")
+    #                 )
+    #                 out_data = sc.transform(np.array(out_data).reshape(-1, 1))[
+    #                     0
+    #                 ][0]
+    #             target = target.cpu().numpy().flatten().tolist()
+    #             if len(target) == 1:
+    #                 target = target[0]
+    #             f.write("%s, %6f, %6f\n" % (id, target, out_data))
+    #             targets.append(target)
+    #             predictions.append(out_data)
+    #     f.close()
+    #     from sklearn.metrics import mean_absolute_error
 
-        print(
-            "Test MAE:",
-            mean_absolute_error(np.array(targets), np.array(predictions)),
-        )
-        if config.store_outputs and not classification:
-            x = []
-            y = []
-            for i in history["EOS"]:
-                x.append(i[0].cpu().numpy().tolist())
-                y.append(i[1].cpu().numpy().tolist())
-            x = np.array(x, dtype="float").flatten()
-            y = np.array(y, dtype="float").flatten()
-            f = open(
-                os.path.join(
-                    config.output_dir, "prediction_results_train_set.csv"
-                ),
-                "w",
-            )
-            # TODO: Add IDs
-            f.write("target,prediction\n")
-            for i, j in zip(x, y):
-                f.write("%6f, %6f\n" % (j, i))
-                line = str(i) + "," + str(j) + "\n"
-                f.write(line)
-            f.close()
+    #     print(
+    #         "Test MAE:",
+    #         mean_absolute_error(np.array(targets), np.array(predictions)),
+    #     )
+    #     if config.store_outputs and not classification:
+    #         x = []
+    #         y = []
+    #         for i in history["EOS"]:
+    #             x.append(i[0].cpu().numpy().tolist())
+    #             y.append(i[1].cpu().numpy().tolist())
+    #         x = np.array(x, dtype="float").flatten()
+    #         y = np.array(y, dtype="float").flatten()
+    #         f = open(
+    #             os.path.join(
+    #                 config.output_dir, "prediction_results_train_set.csv"
+    #             ),
+    #             "w",
+    #         )
+    #         # TODO: Add IDs
+    #         f.write("target,prediction\n")
+    #         for i, j in zip(x, y):
+    #             f.write("%6f, %6f\n" % (j, i))
+    #             line = str(i) + "," + str(j) + "\n"
+    #             f.write(line)
+    #         f.close()
 
     # TODO: Fix IDs for train loader
     """

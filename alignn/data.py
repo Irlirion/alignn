@@ -11,6 +11,7 @@ import torch
 import dgl
 import numpy as np
 import pandas as pd
+from torch.utils.data import Subset
 from jarvis.core.atoms import Atoms
 from jarvis.core.graphs import Graph, StructureDataset
 from jarvis.db.figshare import data as jdata
@@ -18,6 +19,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import math
 from jarvis.db.jsonutils import dumpjson
+from alignn.wfrbf import WFRBF
+from mendeleev.fetch import fetch_table
 
 # from sklearn.pipeline import Pipeline
 import pickle as pk
@@ -68,12 +71,13 @@ def mean_absolute_deviation(data, axis=None):
 
 def load_graphs(
     df: pd.DataFrame,
-    name: str = "dft_3d",
+    name: str = "tmqm",
     neighbor_strategy: str = "k-nearest",
     cutoff: float = 8,
     max_neighbors: int = 12,
     cachedir: Optional[Path] = None,
     use_canonize: bool = False,
+    calculate_wf: bool = False,
 ):
     """Construct crystal graphs.
 
@@ -91,7 +95,7 @@ def load_graphs(
     def atoms_to_graph(atoms):
         """Convert structure dict to DGLGraph."""
         structure = Atoms.from_dict(atoms)
-        return Graph.atom_dgl_multigraph(
+        g = Graph.atom_dgl_multigraph(
             structure,
             cutoff=cutoff,
             atom_features="atomic_number",
@@ -100,13 +104,31 @@ def load_graphs(
             use_canonize=use_canonize,
         )
 
+        if calculate_wf:
+            wfrbf, _, _ = wfrbf_cal(structure.atomic_numbers, structure.coords)
+            g.ndata['wfrbf'] = wfrbf
+        
+        return g
+
+    if calculate_wf:
+        molecules_df = fetch_table(
+            "elements",
+            columns=[
+                "atomic_number",
+                "atomic_radius",
+                "electronic_configuration",
+                "symbol",
+            ],
+        ).iloc[:84]
+        wfrbf_cal = WFRBF(molecules_df, num_features=128)
+
     if cachedir is not None:
-        cachefile = cachedir / f"{name}-{neighbor_strategy}.bin"
+        cachefile = Path(cachedir) / f"{name}-{neighbor_strategy}{'-wf' if calculate_wf else ''}.bin"
     else:
         cachefile = None
 
     if cachefile is not None and cachefile.is_file():
-        graphs, labels = dgl.load_graphs(str(cachefile))
+        graphs, _ = dgl.load_graphs(str(cachefile))
     else:
         graphs = df["atoms"].progress_apply(atoms_to_graph).values
         if cachefile is not None:
@@ -150,10 +172,10 @@ def get_id_train_val_test(
         random.seed(split_seed)
         random.shuffle(ids)
     # np.random.shuffle(ids)
-    if n_train + n_val + n_test > total_size:
+    if n_train + n_val > total_size:
         raise ValueError(
             "Check total number of samples.",
-            n_train + n_val + n_test,
+            n_train + n_val,
             ">",
             total_size,
         )
@@ -167,9 +189,9 @@ def get_id_train_val_test(
     # full train/val test split
     # ids = ids[::-1]
     id_train = ids[:n_train]
-    id_val = ids[-(n_val + n_test) : -n_test]  # noqa:E203
-    id_test = ids[-n_test:]
-    return id_train, id_val, id_test
+    id_val = ids[-n_val:]  # noqa:E203
+    # id_test = ids[-n_test:]
+    return id_train, id_val, None
 
 
 def get_torch_dataset(
@@ -186,10 +208,12 @@ def get_torch_dataset(
     classification=False,
     output_dir=".",
     tmp_name="dataset",
+    cachedir=None,
+    calculate_wf=False,
 ):
     """Get Torch Dataset."""
     df = pd.DataFrame(dataset)
-    # print("df", df)
+    print("df", df)
     vals = df[target].values
     print("data range", np.max(vals), np.min(vals))
     f = open(os.path.join(output_dir, tmp_name + "_data_range"), "w")
@@ -206,6 +230,8 @@ def get_torch_dataset(
         use_canonize=use_canonize,
         cutoff=cutoff,
         max_neighbors=max_neighbors,
+        cachedir=cachedir,
+        calculate_wf=calculate_wf,
     )
 
     data = StructureDataset(
@@ -250,6 +276,8 @@ def get_train_val_loaders(
     keep_data_order=False,
     output_features=1,
     output_dir=None,
+    cachedir=None,
+    calculate_wf=False,
 ):
     """Help function to set up JARVIS train and val dataloaders."""
     train_sample = filename + "_train.data"
@@ -372,14 +400,14 @@ def get_train_val_loaders(
         ids_train_val_test = {}
         ids_train_val_test["id_train"] = [dat[i][id_tag] for i in id_train]
         ids_train_val_test["id_val"] = [dat[i][id_tag] for i in id_val]
-        ids_train_val_test["id_test"] = [dat[i][id_tag] for i in id_test]
+        # ids_train_val_test["id_test"] = [dat[i][id_tag] for i in id_test]
         dumpjson(
             data=ids_train_val_test,
             filename=os.path.join(output_dir, "ids_train_val_test.json"),
         )
         dataset_train = [dat[x] for x in id_train]
         dataset_val = [dat[x] for x in id_val]
-        dataset_test = [dat[x] for x in id_test]
+        # dataset_test = [dat[x] for x in id_test]
 
         if standard_scalar_and_pca:
             y_data = [i[target] for i in dataset_train]
@@ -434,16 +462,16 @@ def get_train_val_loaders(
                 # Random model precited value
                 x_bar = np.mean(np.array([i[target] for i in dataset_train]))
                 baseline_mae = mean_absolute_error(
-                    np.array([i[target] for i in dataset_test]),
-                    np.array([x_bar for i in dataset_test]),
+                    np.array([i[target] for i in dataset_val]),
+                    np.array([x_bar for i in dataset_val]),
                 )
                 print("Baseline MAE:", baseline_mae)
             except Exception as exp:
                 print("Data error", exp)
                 pass
 
-        train_data = get_torch_dataset(
-            dataset=dataset_train,
+        data = get_torch_dataset(
+            dataset=dat,
             id_tag=id_tag,
             atom_features=atom_features,
             target=target,
@@ -456,41 +484,49 @@ def get_train_val_loaders(
             classification=classification_threshold is not None,
             output_dir=output_dir,
             tmp_name="train_data",
-        )
-        val_data = get_torch_dataset(
-            dataset=dataset_val,
-            id_tag=id_tag,
-            atom_features=atom_features,
-            target=target,
-            neighbor_strategy=neighbor_strategy,
-            use_canonize=use_canonize,
-            name=dataset,
-            line_graph=line_graph,
-            cutoff=cutoff,
-            max_neighbors=max_neighbors,
-            classification=classification_threshold is not None,
-            output_dir=output_dir,
-            tmp_name="val_data",
-        )
-        test_data = get_torch_dataset(
-            dataset=dataset_test,
-            id_tag=id_tag,
-            atom_features=atom_features,
-            target=target,
-            neighbor_strategy=neighbor_strategy,
-            use_canonize=use_canonize,
-            name=dataset,
-            line_graph=line_graph,
-            cutoff=cutoff,
-            max_neighbors=max_neighbors,
-            classification=classification_threshold is not None,
-            output_dir=output_dir,
-            tmp_name="test_data",
+            cachedir=cachedir,
+            calculate_wf=calculate_wf,
         )
 
-        collate_fn = train_data.collate
+        train_data, val_data = (
+            Subset(data, id_train), 
+            Subset(data, id_val), 
+            # Subset(data, id_test)
+        )
+        # val_data = get_torch_dataset(
+        #     dataset=dataset_val,
+        #     id_tag=id_tag,
+        #     atom_features=atom_features,
+        #     target=target,
+        #     neighbor_strategy=neighbor_strategy,
+        #     use_canonize=use_canonize,
+        #     name=dataset,
+        #     line_graph=line_graph,
+        #     cutoff=cutoff,
+        #     max_neighbors=max_neighbors,
+        #     classification=classification_threshold is not None,
+        #     output_dir=output_dir,
+        #     tmp_name="val_data",
+        # )
+        # test_data = get_torch_dataset(
+        #     dataset=dataset_test,
+        #     id_tag=id_tag,
+        #     atom_features=atom_features,
+        #     target=target,
+        #     neighbor_strategy=neighbor_strategy,
+        #     use_canonize=use_canonize,
+        #     name=dataset,
+        #     line_graph=line_graph,
+        #     cutoff=cutoff,
+        #     max_neighbors=max_neighbors,
+        #     classification=classification_threshold is not None,
+        #     output_dir=output_dir,
+        #     tmp_name="test_data",
+        # )
+
+        collate_fn = train_data.dataset.collate
         if line_graph:
-            collate_fn = train_data.collate_line_graph
+            collate_fn = train_data.dataset.collate_line_graph
 
         # use a regular pytorch dataloader
         train_loader = DataLoader(
@@ -498,7 +534,7 @@ def get_train_val_loaders(
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
             num_workers=workers,
             pin_memory=pin_memory,
         )
@@ -508,30 +544,30 @@ def get_train_val_loaders(
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            drop_last=True,
-            num_workers=workers,
-            pin_memory=pin_memory,
-        )
-
-        test_loader = DataLoader(
-            test_data,
-            batch_size=1,
-            shuffle=False,
-            collate_fn=collate_fn,
             drop_last=False,
             num_workers=workers,
             pin_memory=pin_memory,
         )
+
+        # test_loader = DataLoader(
+        #     test_data,
+        #     batch_size=1,
+        #     shuffle=False,
+        #     collate_fn=collate_fn,
+        #     drop_last=False,
+        #     num_workers=workers,
+        #     pin_memory=pin_memory,
+        # )
         if save_dataloader:
             torch.save(train_loader, train_sample)
             torch.save(val_loader, val_sample)
-            torch.save(test_loader, test_sample)
+            # torch.save(test_loader, test_sample)
     print("n_train:", len(train_loader.dataset))
     print("n_val:", len(val_loader.dataset))
-    print("n_test:", len(test_loader.dataset))
+    # print("n_test:", len(test_loader.dataset))
     return (
         train_loader,
         val_loader,
-        test_loader,
-        train_loader.dataset.prepare_batch,
+        None,
+        train_data.dataset.prepare_batch,
     )

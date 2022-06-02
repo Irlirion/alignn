@@ -16,6 +16,8 @@ from alignn.models.alignn import ALIGNNConfig
 from alignn.models.dense_alignn import DenseALIGNNConfig
 from alignn.models.alignn_cgcnn import ACGCNNConfig
 from alignn.models.alignn_layernorm import ALIGNNConfig as ALIGNN_LN_Config
+from alignn.models.alignn_fixed import ALIGNNConfig as ALIGNN2Config
+from alignn.models.alignn_wfedge import ALIGNNConfig as ALIGNNWFConfig
 
 # from typing import List
 
@@ -199,6 +201,8 @@ class TrainingConfig(BaseSettings):
     distributed: bool = False
     n_early_stopping: Optional[int] = None  # typically 50
     output_dir: str = os.path.abspath(".")  # typically 50
+    cachedir: Optional[str] = None
+    calculate_wf: bool = False
     # alignn_layers: int = 4
     # gcn_layers: int =4
     # edge_input_features: int= 80
@@ -216,6 +220,8 @@ class TrainingConfig(BaseSettings):
         ALIGNN_LN_Config,
         DenseALIGNNConfig,
         ACGCNNConfig,
+        ALIGNN2Config,
+        ALIGNNWFConfig,
     ] = ALIGNNConfig(name="alignn")
     # ] = CGCNNConfig(name="cgcnn")
 

@@ -1,16 +1,19 @@
 #!/usr/bin/env python
 
 """Module to train for a folder with formatted dataset."""
+import argparse
 import csv
 import os
 import sys
 import time
+
 from jarvis.core.atoms import Atoms
+from jarvis.db.jsonutils import loadjson
+from tqdm import tqdm
+
+from alignn.config import TrainingConfig
 from alignn.data import get_train_val_loaders
 from alignn.train import train_dgl
-from alignn.config import TrainingConfig
-from jarvis.db.jsonutils import loadjson
-import argparse
 
 parser = argparse.ArgumentParser(
     description="Atomistic Line Graph Neural Network"
@@ -57,6 +60,12 @@ parser.add_argument(
     help="Folder to save outputs",
 )
 
+parser.add_argument(
+    "--name",
+    default="dft_3d",
+    help="Dataset name",
+)
+
 
 def train_for_folder(
     root_dir="examples/sample_data",
@@ -67,6 +76,7 @@ def train_for_folder(
     epochs=None,
     file_format="poscar",
     output_dir=None,
+    name="dft_3d",
 ):
     """Train for a folder."""
     # config_dat=os.path.join(root_dir,config_name)
@@ -95,7 +105,7 @@ def train_for_folder(
     n_outputs = []
     multioutput = False
     lists_length_equal = True
-    for i in data:
+    for i in tqdm(data):
         info = {}
         file_name = i[0]
         file_path = os.path.join(root_dir, file_name)
@@ -149,6 +159,7 @@ def train_for_folder(
         test_loader,
         prepare_batch,
     ) = get_train_val_loaders(
+        dataset=name,
         dataset_array=dataset,
         target=config.target,
         n_train=config.n_train,
@@ -175,6 +186,8 @@ def train_for_folder(
         standard_scalar_and_pca=config.standard_scalar_and_pca,
         keep_data_order=config.keep_data_order,
         output_dir=config.output_dir,
+        cachedir=config.cachedir,
+        calculate_wf=config.calculate_wf,
     )
     t1 = time.time()
     train_dgl(
@@ -203,4 +216,5 @@ if __name__ == "__main__":
         batch_size=(args.batch_size),
         epochs=(args.epochs),
         file_format=(args.file_format),
+        name=args.name
     )

@@ -22,7 +22,7 @@ from alignn.utils import BaseSettings
 class ALIGNNConfig(BaseSettings):
     """Hyperparameter schema for jarvisdgl.models.alignn."""
 
-    name: Literal["alignn"]
+    name: Literal["alignn_wf_edge"]
     alignn_layers: int = 4
     gcn_layers: int = 4
     atom_input_features: int = 92
@@ -185,14 +185,14 @@ class MLPLayer(nn.Module):
         return self.layer(x)
 
 
-class ALIGNN(nn.Module):
+class ALIGNNWF2(nn.Module):
     """Atomistic Line graph network.
 
     Chain alternating gated graph convolution updates on crystal graph
     and atomistic line graph.
     """
 
-    def __init__(self, config: ALIGNNConfig = ALIGNNConfig(name="alignn")):
+    def __init__(self, config: ALIGNNConfig = ALIGNNConfig(name="alignn_wf_edge")):
         """Initialize class with number of input features, conv layers."""
         super().__init__()
         # print(config)
@@ -213,13 +213,15 @@ class ALIGNN(nn.Module):
         )
         self.angle_embedding = nn.Sequential(
             RBFExpansion(
-                vmin=-1.0,
+                vmin=-1,
                 vmax=1.0,
                 bins=config.triplet_input_features,
             ),
             MLPLayer(config.triplet_input_features, config.embedding_features),
             MLPLayer(config.embedding_features, config.hidden_features),
         )
+
+        self.edge_lin = nn.Linear(config.hidden_features + 128, config.hidden_features)
 
         self.alignn_layers = nn.ModuleList(
             [
@@ -276,14 +278,16 @@ class ALIGNN(nn.Module):
             z = self.angle_embedding(lg.edata.pop("h"))
 
         g = g.local_var()
-
         # initial node features: atom feature network...
+        g.ndata["wfrbf"] = g.ndata["wfrbf"].float()
+        g.apply_edges(fn.u_add_v("wfrbf", "wfrbf", "add_wfrbf"))
         x = g.ndata.pop("atom_features")
         x = self.atom_embedding(x)
 
         # initial bond features
         bondlength = torch.norm(g.edata.pop("r"), dim=1)
-        y = self.edge_embedding(bondlength)
+        y = torch.cat([self.edge_embedding(bondlength), g.edata.pop("add_wfrbf")], dim=-1)
+        y = self.edge_lin(y)
 
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
